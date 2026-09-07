@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -36,6 +36,9 @@ from setforge.ui.diffview import (
     to_rich,
     two_way_lines,
 )
+
+if TYPE_CHECKING:
+    from setforge.cli.stage import StageSummary
 
 _WIDE_THRESHOLD = 120
 
@@ -122,6 +125,12 @@ def inspect(
     view for the profile, so a drifted file's divergence can be inspected
     before an install or sync resolves it.
     """
+    from setforge.cli.stage import (
+        collect_stages,
+        collect_structured_stages,
+        summarize_stages,
+    )
+
     config = _resolve_config_arg(config)
     cfg = load_config(config)
     repo_root = config.resolve().parent
@@ -137,10 +146,15 @@ def inspect(
         raise typer.Exit(code=2)
     fid, dst, src = match
 
+    staging_rows = summarize_stages(
+        collect_stages(cfg, resolved, repo_root, profile, only=str(dst)),
+        collect_structured_stages(cfg, resolved, repo_root, profile, only=str(dst)),
+    )
     with profile_lock(profile):
         base = reconcile_store.read_base(profile, fid)
         recorded = reconcile_store.read_local(profile, fid)
         entry = reconcile_store.read_index(profile).files.get(str(fid))
+    staging = staging_rows[0] if staging_rows else None
 
     # Absent-live falls back to recorded-local; matched on ABSENT, not truthiness.
     if dst.exists():
@@ -173,6 +187,7 @@ def inspect(
             "merge": merge_pane,
         },
         "index": index,
+        "staging": staging.to_dict() if staging is not None else None,
         "errors": [],
     }
 
@@ -183,12 +198,21 @@ def inspect(
             if console.width >= _WIDE_THRESHOLD
             else RichLayout.STACKED
         )
+        if not base_present:
+            merge_status = "no recorded merge base"
+        elif result.clean:
+            merge_status = "merge clean"
+        else:
+            merge_status = "merge conflicts"
         header = theme.styled(
-            f"inspect {dst}  ({model.summary})", theme.Role.HEADING, stream=console.file
+            f"inspect {dst}  ({merge_status})",
+            theme.Role.HEADING,
+            stream=console.file,
         )
         console.print(header, markup=False, highlight=False)
         console.print(Panel(to_rich(model, layout=layout), title="base | live | merge"))
         _render_index(console, index)
+        _render_staging(console, staging)
 
     render(ctx.obj, "inspect", data, human_fn=_human)
 
@@ -213,6 +237,19 @@ def _render_index(console: Console, index: dict[str, list[dict[str, Any]]]) -> N
         console.print(f"  lines {row['start']}-{row['end']}  [conflict]", markup=False)
 
 
+def _render_staging(console: Console, staging: StageSummary | None) -> None:
+    if staging is None:
+        console.print("staging classifications unavailable for this file")
+        return
+    console.print(
+        f"staging: {staging.shared_promotable} shared-promotable  "
+        f"{staging.drafted} drafted  {staging.reconfirm_required} "
+        f"reconfirm-required  {staging.local} local  {staging.pending} pending"
+    )
+    for blocker in staging.blockers:
+        console.print(f"  blocked: {blocker}")
+
+
 def _emit_error(ctx_obj: OutputContext | None, message: str) -> None:
     if ctx_obj is not None and ctx_obj.format is OutputFormat.JSON:
         sys.stdout.write(wrap_json("inspect", _empty_data(), errors=[message]))
@@ -227,5 +264,6 @@ def _empty_data() -> dict[str, Any]:
         "base_present": False,
         "panes": {"base": None, "live": None, "merge": None},
         "index": {"shared": [], "kept_local": [], "conflict": []},
+        "staging": None,
         "errors": [],
     }

@@ -144,6 +144,33 @@ def test_collect_is_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert index_path.stat().st_mtime_ns == before  # wrote nothing
 
 
+def test_plain_anchor_change_oracle_is_clean_but_reclassifies_pending() -> None:
+    """Pin the engine fact on which cross-command staging diagnostics depend."""
+    from setforge.reconcile.hunks import classify, extract_hunks, serialize
+    from setforge.reconcile.merge import merge
+
+    base = (
+        b'title = "demo"\nalpha = 1\nbeta = 2\ngamma = 3\n'
+        b"delta = 4\nepsilon = 5\nzeta = 6\n"
+    )
+    local = base.replace(b"beta = 2", b"beta = 20")
+    upstream = base.replace(b"epsilon = 5", b"inserted = true\nepsilon = 5")
+    (original,) = extract_hunks(base, local)
+    stored = serialize([replace(original, cls=HunkClass.LOCAL)])
+
+    result = merge(base, local, upstream)
+    assert result.clean
+    merged = result.merged()
+    assert isinstance(merged, bytes)
+    assert b"beta = 20" in merged
+    assert b"inserted = true" in merged
+
+    (fresh,) = extract_hunks(upstream, merged)
+    assert fresh.unit_id != original.unit_id
+    (classified,) = classify([fresh], stored)
+    assert classified.cls is HunkClass.PENDING
+
+
 def test_walk_applies_choices_and_quits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,6 +270,38 @@ def test_render_list_json_changed_local_needs_no_reconfirm(
     assert row["local"] == 1
     assert row["ownership"] == "adopt"
     assert row["blockers"] == ["container ownership: present, external, unowned"]
+
+
+def test_summarize_stages_is_the_stage_json_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from setforge.cli.stage import summarize_stages
+
+    cfg, repo, profile = _setup(tmp_path, monkeypatch)
+    (stage,) = collect_stages(cfg, resolve_profile(cfg, profile), repo, profile)
+    local = replace(stage.hunks[0], cls=HunkClass.LOCAL, changed=True)
+    shared = replace(stage.hunks[1], cls=HunkClass.SHARED, changed=True)
+
+    (summary,) = summarize_stages(
+        [replace(stage, participating=True, hunks=[local, shared])]
+    )
+
+    assert summary.local == 1
+    assert summary.shared == 1
+    assert summary.shared_promotable == 0
+    assert summary.reconfirm_required == 1
+    assert list(summary.to_dict()) == [
+        "name",
+        "participating",
+        "shared",
+        "shared_promotable",
+        "drafted",
+        "reconfirm_required",
+        "local",
+        "pending",
+        "blockers",
+        "ownership",
+    ]
 
 
 def test_same_class_reconfirm_refreshes_plain_confirmed_hash(

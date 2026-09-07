@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import typer
@@ -164,6 +165,9 @@ from setforge.tree_management import (
     write_inventory,
 )
 
+if TYPE_CHECKING:
+    from setforge.cli.stage import StageSummary
+
 
 @dataclass(frozen=True, slots=True)
 class InstallPlan:
@@ -174,6 +178,7 @@ class InstallPlan:
         str, Mapping[source_mod.HostLocalSectionName, source_mod.HostLocalSection]
     ]
     drift_report: compare_mod.CompareReport
+    staging: tuple[StageSummary, ...]
     deploys: tuple[_PendingDeploy, ...]
     reconcile_store_mutation: bool
     bootstrap: tuple[Path, ...]
@@ -457,7 +462,29 @@ def _build_install_plan(  # noqa: C901 - freezes every install input in one pass
     package_owner_id: UUID | None = None,
 ) -> InstallPlan:
     """Compute every tracked-file decision before the first install write."""
+    from setforge.cli.stage import (
+        collect_stages,
+        collect_structured_stages,
+        summarize_stages,
+    )
+
     tracked_entries = tuple(_iter_all_tracked_files(ctx))
+    staging = summarize_stages(
+        collect_stages(
+            ctx.cfg,
+            ctx.resolved,
+            ctx.repo_root,
+            ctx.profile,
+            include_ownership=False,
+        ),
+        collect_structured_stages(
+            ctx.cfg,
+            ctx.resolved,
+            ctx.repo_root,
+            ctx.profile,
+            include_ownership=False,
+        ),
+    )
     tree_entries = tuple(_iter_all_trees(ctx))
     codex_configs = codex_resources_mod.plan_config_resources(
         ctx.cfg,
@@ -630,6 +657,7 @@ def _build_install_plan(  # noqa: C901 - freezes every install input in one pass
         ctx=ctx,
         host_local_sections=frozen_host_local,
         drift_report=drift_report,
+        staging=staging,
         deploys=deploys,
         reconcile_store_mutation=install_helpers_mod._planned_reconcile_store_mutation(
             ctx.profile, deploys
@@ -1333,6 +1361,7 @@ def _render_install_plan(
     _dry_run_pipeline(
         ctx=plan.ctx,
         drift_report=plan.drift_report,
+        staging=plan.staging,
         deploys=plan.deploys,
         provisioning=plan.provisioning,
         mcp=plan.mcp,
@@ -1356,6 +1385,24 @@ def _render_install_plan(
             typer.echo(f"  WOULD remove  {plugin_id}")
         if not report:
             typer.echo("  nothing to reconcile")
+
+
+def _render_preinstall_staging(
+    staging: tuple[StageSummary, ...],
+) -> None:
+    actionable = tuple(row for row in staging if row.pending or row.reconfirm_required)
+    if not actionable:
+        return
+    typer.echo("=== pre-install staging classifications ===")
+    for row in actionable:
+        typer.echo(
+            f"{row.name}: {row.shared_promotable} shared-promotable  "
+            f"{row.drafted} drafted  {row.reconfirm_required} "
+            f"reconfirm-required  {row.local} local  {row.pending} pending"
+        )
+        for blocker in row.blockers:
+            if "run `setforge stage" in blocker:
+                typer.echo(f"  blocked: {blocker}")
 
 
 def _fetch_upstream(
@@ -2287,6 +2334,7 @@ def install(  # noqa: C901 - confirmation and frozen-plan orchestration
             if welcome_choice is not WelcomeChoice.PROCEED:
                 return
 
+        _render_preinstall_staging(plan.staging)
         _run_predeploy_gates(
             drift_report=plan.drift_report,
             ctx=ctx,

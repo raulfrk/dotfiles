@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-07
+
+### Fixed
+
+- Stage, inspect, and install now expose consistent current staging
+  classifications during clean, no-op reconciliation.
+
 ## [1.3.0] - 2026-09-04
 
 ### Added
@@ -380,7 +387,8 @@ tag). See the migration section of the README for the upgrade recipe.
 <!-- 0.2.1 is documented for history but was never tagged (it folded
 into the v0.2.2 tag), so it carries no compare ref. The 0.2.2 refs
 resolve once the v0.2.2 tag lands on origin/main. -->
-[Unreleased]: https://github.com/raulfrk/setforge/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/raulfrk/setforge/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/raulfrk/setforge/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/raulfrk/setforge/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/raulfrk/setforge/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/raulfrk/setforge/compare/v1.0.0...v1.1.0

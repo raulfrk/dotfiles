@@ -223,6 +223,7 @@ def collect_stages(
     profile: str,
     *,
     only: str | None = None,
+    include_ownership: bool = True,
 ) -> list[FileStage]:
     """Classified-hunk view for each staged-eligible plain file. READ-ONLY.
 
@@ -277,7 +278,7 @@ def collect_stages(
                     live,
                     hunks,
                     entry.staged if entry is not None else False,
-                    _file_ownership(repo_root, sub_dst),
+                    _file_ownership(repo_root, sub_dst) if include_ownership else None,
                 )
             )
     return stages
@@ -299,6 +300,37 @@ class StructuredFileStage:
     ownership: FileDecision | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StageSummary:
+    """One immutable, command-neutral staging classification summary."""
+
+    name: str
+    participating: bool
+    shared: int
+    shared_promotable: int
+    drafted: int
+    reconfirm_required: int
+    local: int
+    pending: int
+    blockers: tuple[str, ...]
+    ownership: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable stage JSON schema and key order."""
+        return {
+            "name": self.name,
+            "participating": self.participating,
+            "shared": self.shared,
+            "shared_promotable": self.shared_promotable,
+            "drafted": self.drafted,
+            "reconfirm_required": self.reconfirm_required,
+            "local": self.local,
+            "pending": self.pending,
+            "blockers": list(self.blockers),
+            "ownership": self.ownership,
+        }
+
+
 def collect_structured_stages(
     cfg: Config,
     resolved: ResolvedProfile,
@@ -306,6 +338,7 @@ def collect_structured_stages(
     profile: str,
     *,
     only: str | None = None,
+    include_ownership: bool = True,
 ) -> list[StructuredFileStage]:
     """Classified-key-unit view for each staged-eligible structured file. READ-ONLY.
 
@@ -360,7 +393,7 @@ def collect_structured_stages(
                     fmt,
                     units,
                     entry.staged if entry is not None else False,
-                    _file_ownership(repo_root, sub_dst),
+                    _file_ownership(repo_root, sub_dst) if include_ownership else None,
                 )
             )
     return stages
@@ -1407,19 +1440,18 @@ def _confirm_file_ownership(
         return None
 
 
-def _render_list(
-    ctx_obj: OutputContext | None,
-    stages: list[FileStage],
-    struct: list[StructuredFileStage] | None = None,
-) -> None:
-    """Render durable participation and capture-actionability diagnostics."""
+def summarize_stages(
+    stages: Sequence[FileStage],
+    structured: Sequence[StructuredFileStage] = (),
+) -> tuple[StageSummary, ...]:
+    """Summarize staging units without rendering or mutating their stores."""
 
-    def row(
+    def summarize(
         name: str,
         units: list[Hunk] | list[KeyUnit],
         participating: bool,
         ownership: FileDecision | None,
-    ) -> dict[str, Any]:
+    ) -> StageSummary:
         tally = Counter(unit.cls for unit in units)
         reconfirm = sum(unit.changed and unit.cls is HunkClass.SHARED for unit in units)
         promotable = sum(
@@ -1444,31 +1476,42 @@ def _render_list(
             FileAction.HOLD,
         }:
             blockers.append(f"container ownership: {ownership.detail}")
-        return {
-            "name": name,
-            "participating": participating,
+        return StageSummary(
+            name=name,
+            participating=participating,
             # Schema v1 compatibility: ``shared`` remains the total durable
             # SHARED classification count.  The additive fields below explain
             # which of those rows are currently promotable versus blocked on
             # explicit re-confirmation.
-            "shared": tally[HunkClass.SHARED],
-            "shared_promotable": promotable,
-            "drafted": tally[HunkClass.SHARED_DRAFTED],
-            "reconfirm_required": reconfirm,
-            "local": tally[HunkClass.LOCAL],
-            "pending": pending,
-            "blockers": blockers,
-            "ownership": ownership_status,
-        }
+            shared=tally[HunkClass.SHARED],
+            shared_promotable=promotable,
+            drafted=tally[HunkClass.SHARED_DRAFTED],
+            reconfirm_required=reconfirm,
+            local=tally[HunkClass.LOCAL],
+            pending=pending,
+            blockers=tuple(blockers),
+            ownership=ownership_status,
+        )
 
-    data = [
-        row(stage.sub_name, stage.hunks, stage.participating, stage.ownership)
+    summaries = [
+        summarize(stage.sub_name, stage.hunks, stage.participating, stage.ownership)
         for stage in stages
     ]
-    data += [
-        row(item.sub_name, item.units, item.participating, item.ownership)
-        for item in (struct or [])
+    summaries += [
+        summarize(item.sub_name, item.units, item.participating, item.ownership)
+        for item in structured
     ]
+    return tuple(summaries)
+
+
+def _render_list(
+    ctx_obj: OutputContext | None,
+    stages: list[FileStage],
+    struct: list[StructuredFileStage] | None = None,
+) -> None:
+    """Render durable participation and capture-actionability diagnostics."""
+    summaries = summarize_stages(stages, struct or ())
+    data = [summary.to_dict() for summary in summaries]
 
     def _human() -> None:
         console = Console()

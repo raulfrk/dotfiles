@@ -10,8 +10,11 @@ per-case behavior + the base-store side effect.
 
 from __future__ import annotations
 
+import json
+import stat
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -146,6 +149,148 @@ def test_local_edit_preserved_when_upstream_unchanged(repo: Path) -> None:
     _live().write_text("locally edited\n", encoding="utf-8")
     assert _install(config).exit_code == 0
     assert _live().read_text(encoding="utf-8") == "locally edited\n"
+
+
+def test_stale_toml_anchor_has_identical_cli_diagnostics_without_mutation(
+    repo: Path,
+) -> None:
+    from setforge.cli.stage import Decision, _apply, collect_stages, walk
+    from setforge.config import load_config, resolve_effective_profile
+    from setforge.file_ownership import FileAction
+    from setforge.locking import profile_lock
+    from setforge.reconcile import hunks as hunks_mod
+    from setforge.reconcile import store
+    from setforge.reconcile.merge import merge
+    from setforge.reconcile.types import HunkClass, file_id
+
+    base = (
+        b'title = "demo"\nalpha = 1\nbeta = 2\ngamma = 3\n'
+        b"delta = 4\nepsilon = 5\nzeta = 6\n"
+    )
+    local = base.replace(b"beta = 2", b"beta = 20")
+    upstream = base.replace(b"epsilon = 5", b"inserted = true\nepsilon = 5")
+    tracked = repo / "tracked" / "settings.toml"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_bytes(base)
+    live = Path.home() / ".setforge_recon" / "settings.toml"
+    config = repo / "setforge.yaml"
+    config.write_text(
+        "version: 1\n"
+        "tracked_files:\n"
+        "  settings:\n"
+        "    src: settings.toml\n"
+        "    dst: ~/.setforge_recon/settings.toml\n"
+        "profiles:\n"
+        f"  {_PROFILE}:\n"
+        "    tracked_files: [settings]\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init", "-b", "main")
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=SetForge Tests",
+        "-c",
+        "user.email=setforge@example.invalid",
+        "commit",
+        "-m",
+        "stale anchor fixture",
+    )
+    assert _install(config).exit_code == 0
+    live.write_bytes(local)
+
+    cfg = load_config(config)
+    resolved = resolve_effective_profile(cfg, _PROFILE, repo).resolved
+    (old_stage,) = collect_stages(cfg, resolved, repo, _PROFILE)
+    assert old_stage.ownership is not None
+    assert old_stage.ownership.action is FileAction.REVIEW
+    (old_unit,) = old_stage.hunks
+    _apply(
+        _PROFILE,
+        old_stage,
+        walk(old_stage.hunks, lambda _hunk, _i, _n: Decision(HunkClass.LOCAL)),
+    )
+    stored = store.read_index(_PROFILE).files["settings"].hunks
+    assert stored == hunks_mod.serialize([replace(old_unit, cls=HunkClass.LOCAL)])
+
+    tracked.write_bytes(upstream)
+    merged = merge(base, local, upstream)
+    assert merged.clean
+    merged_bytes = merged.merged()
+    assert isinstance(merged_bytes, bytes)
+    assert b"beta = 20" in merged_bytes
+    assert b"inserted = true" in merged_bytes
+    live.write_bytes(merged_bytes)
+    with profile_lock(_PROFILE):
+        store.record(
+            _PROFILE,
+            file_id("settings"),
+            base=upstream,
+            local=merged_bytes,
+            staged=True,
+            hunks=stored,
+        )
+
+    (fresh_stage,) = collect_stages(cfg, resolved, repo, _PROFILE)
+    (fresh_unit,) = fresh_stage.hunks
+    assert fresh_unit.unit_id != old_unit.unit_id
+    assert fresh_unit.cls is HunkClass.PENDING
+
+    fid = file_id("settings")
+    index_path = store._index_path(_PROFILE)
+
+    def snapshot() -> tuple[object, ...]:
+        return (
+            tracked.read_bytes(),
+            live.read_bytes(),
+            store.read_base(_PROFILE, fid),
+            store.read_local(_PROFILE, fid),
+            index_path.read_bytes(),
+            store.read_drafts(_PROFILE, fid),
+            stat.S_IMODE(tracked.stat().st_mode),
+            stat.S_IMODE(live.stat().st_mode),
+        )
+
+    before = snapshot()
+    runner = CliRunner()
+    common = [f"--profile={_PROFILE}", f"--config={config}"]
+    stage_result = runner.invoke(app, ["--format=json", "stage", "--list", *common])
+    inspect_result = runner.invoke(
+        app, ["--format=json", "inspect", "settings", *common]
+    )
+    inspect_human = runner.invoke(app, ["inspect", "settings", *common])
+    dry_run = runner.invoke(
+        app,
+        [
+            "install",
+            *common,
+            "--dry-run",
+            "--locked",
+            "--no-fetch",
+            "--no-git-check",
+            "--no-secrets-scan",
+        ],
+    )
+    for result in (stage_result, inspect_result, inspect_human, dry_run):
+        assert result.exit_code == 0, result.output
+
+    (stage_row,) = json.loads(stage_result.stdout)["data"]
+    inspect_data = json.loads(inspect_result.stdout)["data"]
+    assert stage_row["pending"] == inspect_data["staging"]["pending"] == 1
+    assert "merge clean" in inspect_human.stdout
+    assert "unexpected drift in 0 file(s)" in dry_run.stdout
+    assert f"WOULD noop      {live}" in dry_run.stdout
+    assert "settings: 0 shared-promotable" in dry_run.stdout
+    assert "0 local  1 pending" in dry_run.stdout
+    assert snapshot() == before
+
+    real_install = _install(config)
+    assert real_install.exit_code == 0, real_install.output
+    assert "=== pre-install staging classifications ===" in real_install.stdout
+    assert "0 local  1 pending" in real_install.stdout
+    assert "run `setforge stage settings` to classify" in real_install.stdout
+    assert snapshot() == before
 
 
 def test_divergent_live_without_base_seeds_and_keeps_live(repo: Path) -> None:

@@ -96,6 +96,8 @@ def test_inspect_json_envelope_is_ansi_free(
     assert "live edit" in data["panes"]["live"]
     assert "upstream edit" in data["panes"]["merge"]
     assert set(data["index"]) == {"shared", "kept_local", "conflict"}
+    assert data["staging"]["pending"] == 1
+    assert data["staging"]["local"] == 0
     assert data.get("errors", []) == []
 
 
@@ -117,6 +119,50 @@ def test_inspect_no_base_collapses_to_two_pane(
     data = json.loads(result.stdout)["data"]
     assert data["base_present"] is False
     assert data["panes"]["base"] is None
+    assert data["staging"] is None
+
+
+def test_inspect_eligible_converged_file_has_zero_staging_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path, _ = _setup(tmp_path, monkeypatch, base=_BASE, live=_BASE, tracked=_BASE)
+    result = CliRunner().invoke(
+        app,
+        [
+            "--format=json",
+            "inspect",
+            "CLAUDE.md",
+            "--profile=p",
+            f"--config={cfg_path}",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    staging = json.loads(result.stdout)["data"]["staging"]
+    assert staging is not None
+    assert [
+        staging[key]
+        for key in (
+            "shared",
+            "shared_promotable",
+            "drafted",
+            "reconfirm_required",
+            "local",
+            "pending",
+        )
+    ] == [0, 0, 0, 0, 0, 0]
+
+
+def test_inspect_human_reports_conflict_and_pending_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path, _ = _setup(tmp_path, monkeypatch)
+    result = CliRunner().invoke(
+        app, ["inspect", "CLAUDE.md", "--profile=p", f"--config={cfg_path}"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "merge conflicts" in result.output
+    assert "1 pending" in result.output
+    assert "pending unit(s): run `setforge stage CLAUDE.md`" in result.output
 
 
 def test_inspect_untracked_exits_2_structured(

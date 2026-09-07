@@ -38,8 +38,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from setforge.cli import _install_helpers as install_helpers_mod
 from setforge.cli import app
 from setforge.cli import install as install_mod
+from setforge.cli.stage import StageSummary
 from setforge.compare import CompareStatus
 from setforge.config import ReconcilePolicy
 from setforge.deploy import DeployAction
@@ -51,6 +53,64 @@ from setforge.transitions import transitions_root
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "e2e"
 _FIXTURE_YAML = _FIXTURE_DIR / "setforge.test.yaml"
 _FIXTURE_TRACKED = _FIXTURE_DIR / "tracked"
+
+
+def _stage_summary(**overrides: object) -> StageSummary:
+    values: dict[str, object] = {
+        "name": "settings.toml",
+        "participating": True,
+        "shared": 0,
+        "shared_promotable": 0,
+        "drafted": 0,
+        "reconfirm_required": 0,
+        "local": 0,
+        "pending": 0,
+        "blockers": (),
+        "ownership": "keep",
+    }
+    values.update(overrides)
+    return StageSummary(**values)  # type: ignore[arg-type]
+
+
+def test_dry_run_staging_omits_zero_units_and_prints_all_five_counts(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    install_helpers_mod._dry_run_emit_staging(
+        (
+            _stage_summary(name="empty.toml"),
+            _stage_summary(local=1),
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "=== current staging classifications ===" in output
+    assert "empty.toml" not in output
+    assert (
+        "settings.toml: 0 shared-promotable  0 drafted  0 reconfirm-required  "
+        "1 local  0 pending"
+    ) in output
+
+
+def test_real_install_staging_warning_only_prints_actionable_rows(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    install_mod._render_preinstall_staging(
+        (
+            _stage_summary(name="stable.toml", local=1),
+            _stage_summary(
+                pending=1,
+                blockers=(
+                    "1 pending unit(s): run `setforge stage settings.toml` to classify",
+                ),
+            ),
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "=== pre-install staging classifications ===" in output
+    assert "stable.toml" not in output
+    assert "settings.toml: 0 shared-promotable" in output
+    assert "run `setforge stage settings.toml` to classify" in output
 
 
 @pytest.fixture

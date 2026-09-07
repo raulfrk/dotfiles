@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC
 from enum import Enum, auto
 from pathlib import Path
-from typing import Final, assert_never
+from typing import TYPE_CHECKING, Final, assert_never
 
 import typer
 
@@ -98,6 +98,9 @@ from setforge.source import (
     validate_host_local_sections_file_type,
 )
 from setforge.ui.diffview import to_fragments, two_way_lines
+
+if TYPE_CHECKING:
+    from setforge.cli.stage import StageSummary
 from setforge.ui.primitives import CANCEL, Button, Cancelled
 
 
@@ -1233,6 +1236,7 @@ def _dry_run_pipeline(
     *,
     ctx: ProfileContext,
     drift_report: compare_mod.CompareReport | None = None,
+    staging: tuple[StageSummary, ...] = (),
     deploys: tuple[_PendingDeploy, ...] | None = None,
     provisioning: ProvisioningPlan | None = None,
     mcp: MCPInstallPlan | None = None,
@@ -1256,6 +1260,7 @@ def _dry_run_pipeline(
     """
     typer.echo(_DRY_RUN_HEADER)
     _dry_run_emit_profile_summary(ctx)
+    _dry_run_emit_staging(staging)
     # NOT profile_lock'd: acquiring it would create the lock file, a dry-run mutation.
     if host_local_sections_map is None:
         host_local_sections_map = _load_validated_host_local_sections(
@@ -1300,6 +1305,23 @@ def _dry_run_pipeline(
     dry_run_packages(ctx.cfg, ctx.resolved, plan=provisioning)
     _dry_run_emit_transition_path(ctx, record=record_transition)
     typer.echo(_DRY_RUN_FINAL_LINE)
+
+
+def _dry_run_emit_staging(staging: tuple[StageSummary, ...]) -> None:
+    """Render frozen stage summaries without recollecting mutable state."""
+    typer.echo("=== current staging classifications ===")
+    displayed = [
+        row for row in staging if row.shared + row.drafted + row.local + row.pending > 0
+    ]
+    if not displayed:
+        typer.echo("  no current staged units")
+        return
+    for row in displayed:
+        typer.echo(
+            f"{row.name}: {row.shared_promotable} shared-promotable  "
+            f"{row.drafted} drafted  {row.reconfirm_required} "
+            f"reconfirm-required  {row.local} local  {row.pending} pending"
+        )
 
 
 def _dry_run_emit_profile_summary(ctx: ProfileContext) -> None:
